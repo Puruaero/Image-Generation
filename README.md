@@ -1,1 +1,1 @@
-Lets learn to generate Images
+Lets learn to generate images
