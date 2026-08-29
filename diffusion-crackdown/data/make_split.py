@@ -1,8 +1,9 @@
-"""Repartition NIH ChestX-ray14 into train / val / test lists by image count.
+"""Repartition NIH ChestX-ray14 into train / val (/ test) lists by patient count.
 
 NIH ships train_val_list.txt and test_list.txt and no validation list. This pools
-whatever lists you hand it and re-cuts them to target sizes (default 100k train,
-5k val, remainder test).
+whatever lists you hand it and re-cuts them: --val_patients held out, everything
+else to train. Pass --test_patients to get a third list; omit it and only two are
+written.
 
 That deliberately discards NIH's official train/test boundary, so numbers here
 are not comparable to published CXR14 benchmarks -- irrelevant for generative
@@ -37,12 +38,11 @@ def read_lists(paths):
     return names
 
 
-def split_by_patient(names, n_train, n_val, seed):
-    """Cut into (train, val, test) at patient boundaries, targeting image counts.
+def split_by_patient(names, n_val, n_test, seed):
+    """Cut into {train, val[, test]} at patient boundaries, by patient count.
 
-    Patients are indivisible, so a bucket closes on the patient that first takes
-    it to its target -- counts land near the targets, not exactly on them. The
-    actual sizes are reported rather than forced.
+    Sizes are exact in patients; the resulting image counts follow from however
+    many studies those patients happen to have.
     """
     by_patient = defaultdict(list)
     for n in names:
@@ -51,28 +51,23 @@ def split_by_patient(names, n_train, n_val, seed):
     patients = sorted(by_patient)  # sort first: dict order must not affect the seed
     random.Random(seed).shuffle(patients)
 
-    if n_train + n_val >= len(names):
+    if n_val + n_test >= len(patients):
         raise ValueError(
-            f"n_train + n_val = {n_train + n_val} leaves no test images "
-            f"out of {len(names)}"
+            f"val+test = {n_val + n_test} patients leaves none for train "
+            f"out of {len(patients)}"
         )
+    if n_val <= 0:
+        raise ValueError("--val_patients must be positive")
 
-    buckets, targets = [[], [], []], [n_train, n_val, None]
-    b, count = 0, 0
-    for p in patients:
-        # Close the current bucket once it has reached its target, then move on.
-        # targets[-1] is None: test absorbs whatever is left.
-        while targets[b] is not None and count >= targets[b]:
-            b, count = b + 1, 0
-        buckets[b].append(p)
-        count += len(by_patient[p])
+    held = {"val": patients[:n_val]}
+    if n_test:
+        held["test"] = patients[n_val : n_val + n_test]
+    held["train"] = patients[n_val + n_test :]
 
-    train, val, test = (
-        sorted(n for p in bucket for n in by_patient[p]) for bucket in buckets
-    )
-    if not val or not test:
-        raise ValueError("a split came out empty -- check n_train / n_val")
-    return train, val, test
+    return {
+        split: sorted(n for p in pats for n in by_patient[p])
+        for split, pats in held.items()
+    }
 
 
 def main():
@@ -80,31 +75,45 @@ def main():
     p.add_argument("lists", nargs="+",
                    help="NIH lists to pool, e.g. train_val_list.txt test_list.txt")
     p.add_argument("--out_dir", default=".")
-    p.add_argument("--n_train", type=int, default=100_000)
-    p.add_argument("--n_val", type=int, default=5_000)
+    p.add_argument("--val_patients", type=int, default=750)
+    p.add_argument("--test_patients", type=int, default=0,
+                   help="0 (default) writes no test list -- train/val only")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
     names = read_lists(args.lists)
-    train, val, test = split_by_patient(names, args.n_train, args.n_val, args.seed)
+    splits = split_by_patient(names, args.val_patients, args.test_patients, args.seed)
 
     # The whole point of the file -- assert it rather than trust it.
-    pats = [{patient_id(n) for n in s} for s in (train, val, test)]
-    for i, j, label in ((0, 1, "train/val"), (0, 2, "train/test"), (1, 2, "val/test")):
-        assert not (pats[i] & pats[j]), f"patient leakage between {label}"
-    assert len(train) + len(val) + len(test) == len(names), "images lost or duplicated"
+    pats = {s: {patient_id(n) for n in rows} for s, rows in splits.items()}
+    for a in pats:
+        for b in pats:
+            if a < b:
+                assert not (pats[a] & pats[b]), f"patient leakage between {a}/{b}"
+    assert sum(len(r) for r in splits.values()) == len(names), \
+        "images lost or duplicated"
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     total = len(names)
-    print(f"pooled {total} images, {len(set().union(*pats))} patients "
+    print(f"pooled {total} images, {len(set().union(*pats.values()))} patients "
           f"(seed {args.seed})")
-    for name, rows, pat in (("train_list.txt", train, pats[0]),
-                            ("val_list.txt", val, pats[1]),
-                            ("test_list.txt", test, pats[2])):
-        (out / name).write_text("\n".join(rows) + "\n")
-        print(f"  {name:<15} {len(rows):>7} images ({len(rows)/total:5.1%})  "
-              f"{len(pat):>6} patients")
+    for split in ("train", "val", "test"):
+        if split not in splits:
+            continue
+        rows = splits[split]
+        (out / f"{split}_list.txt").write_text("\n".join(rows) + "\n")
+        print(f"  {split + '_list.txt':<15} {len(rows):>7} images ({len(rows)/total:5.1%})"
+              f"  {len(pats[split]):>6} patients")
+    # A leftover list from an earlier run with different settings is the exact
+    # silent leak this file exists to prevent -- its patients are now in train.
+    stale = [f for f in ("train_list.txt", "val_list.txt", "test_list.txt")
+             if f.replace("_list.txt", "") not in splits and (out / f).exists()]
+    if stale:
+        print(f"\nWARNING: {', '.join(stale)} in {out} is left over from an "
+              f"earlier run and was NOT rewritten.\n"
+              f"         Its patients are in train_list.txt now. Delete it.")
+
     print("patient overlap between every pair: 0")
 
 
