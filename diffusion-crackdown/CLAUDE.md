@@ -134,8 +134,9 @@ Start in **plain-DDPM mode**: `learn_sigma=False`, `noise_schedule=linear`, MSE 
 a live test of the config-change-not-rewrite rule on the very first paper transition.
 
 ε-prediction U-Net, T=1000. AdamW 1e-4–2e-4, warmup, grad-clip 1.0.
-**EMA 0.999, and sample from the EMA weights** — the single most common cause of
-"my DDPM doesn't work."
+**EMA 0.9999, and sample from the EMA weights** — Ho's own value (paper Appendix B) and
+the `improved-diffusion` default; ~10k-step averaging window. Sampling from the raw iterate
+is the single most common cause of "my DDPM doesn't work."
 
 **Judge progress by a fixed-seed sample grid every N epochs plus held-out FID.** Not by the
 loss curve: L_simple plateaus early and stays uninformative, because its floor is
