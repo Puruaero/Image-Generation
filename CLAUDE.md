@@ -11,12 +11,19 @@ for whatever is actually being worked on.
 Image-Generation/
 ├── CLAUDE.md                 # this file — conventions, working style, git
 └── diffusion-crackdown/      # diffusion models (active) — see its own CLAUDE.md
-    └── openai_diffusion/     # openai/improved-diffusion, vendored as a git subtree
+    ├── openai_diffusion/     # openai/improved-diffusion, vendored as a git subtree
+    └── lab/                  # his own layer: data, training, samplers, backend adapters
 ```
 
-Future folders (VAEs standalone, flow matching, point-cloud generation, GANs if ever) follow
-the same shape: one folder, one `CLAUDE.md`, vendored upstream code kept in a clearly named
-subfolder with its original LICENSE intact.
+**One folder per paradigm.** `diffusion-crackdown/` is denoising diffusion only; score
+matching (SMLD, Score SDE) goes in `score-matching-crackdown/`, VAEs in their own, and so
+on. The split is by paradigm rather than by convenience — a folder whose corruption family
+or objective family differs is a different folder, even when it shares the dataset and the
+theory track. Future folders (score matching, VAEs standalone, flow matching, point-cloud
+generation, GANs if ever) follow the same shape: one folder, one `CLAUDE.md`, vendored upstream code kept in a clearly named
+subfolder with its original LICENSE intact, and **his own code in a sibling `lab/`** rather
+than mixed into the vendored tree. The vendored core is a dependency of `lab/`, never the
+other way round — that is what keeps it swappable.
 
 ---
 

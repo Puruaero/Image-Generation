@@ -3,16 +3,62 @@
 Diffusion models, implemented from the papers, on medical images. Parent `CLAUDE.md` in
 `Image-Generation/` carries working style, git auth, and vendoring conventions — read it too.
 
+**Scope: denoising diffusion only.** Other generative paradigms get their own top-level
+folder next to this one — score matching / SMLD / Score SDE in `score-matching-crackdown/`,
+VAEs in their own, and so on, each with its own `CLAUDE.md` and its own `lab/`. That split
+is by *paradigm*, not by difficulty: a technique belongs here only if it is the VP forward
+process plus a reverse process learned by denoising. Anything that changes the corruption
+family or the objective family is a different folder. Do not grow this one sideways.
+
 ```
 diffusion-crackdown/
-└── openai_diffusion/         # openai/improved-diffusion, git subtree, MIT LICENSE retained
-    ├── improved_diffusion/   # gaussian_diffusion.py, unet.py, respace.py, train_util.py
-    ├── scripts/
-    └── datasets/
+├── openai_diffusion/         # openai/improved-diffusion, git subtree, MIT LICENSE retained
+│   ├── improved_diffusion/   # gaussian_diffusion.py, unet.py, respace.py, train_util.py
+│   ├── scripts/
+│   └── datasets/
+└── lab/                      # his code. Run everything as `python -m lab.…` from here.
+    ├── data/                 # cxr14.py (dataloader), make_split.py (patient-level split)
+    ├── backends/             # adapters onto a vendored core; openai.py is the only one
+    └── training/             # train.py (CLI), loop.py (single-GPU TrainLoop + EMA)
 ```
 
 **Status: milestone 1 — DDPM producing recognizable samples at 64² on NIH ChestX-ray14.**
-Nothing trains yet. First code task is the dataloader.
+Data layer and single-GPU training loop are written and smoke-tested end to end on CPU;
+no real run has happened yet. Next: first 64² run on the DGX, then the ancestral sampler,
+which is his.
+
+---
+
+## The `lab/` ↔ backend boundary
+
+`lab/` owns data, the training loop, the samplers, and evaluation. The **network and the
+forward/reverse process come from a vendored core**, read not rewritten. A backend is a
+module in `lab/backends/` exposing exactly two functions:
+
+```
+defaults()                        -> dict of config keys and their defaults
+create_model_and_diffusion(**cfg) -> (nn.Module, diffusion)
+```
+
+with `diffusion` providing `.training_losses(model, x_0, t, model_kwargs, noise=None)` and
+`.num_timesteps`. That is the entire contract. A second core (score_sde, or a from-scratch
+VE process) is a new module here — `training/` and `data/` must not have to know.
+
+`backends/openai.py` re-implements upstream's `create_model_and_diffusion` for one reason
+only: `script_util.create_model` hardcodes `in_channels=3` and there is no flag for
+grayscale. Everything else is upstream's own construction, called directly. **Do not fork
+more of `script_util` into it** — if a need is expressible as a config key upstream already
+has, pass the key.
+
+`training/loop.py` is upstream's `TrainLoop` for one GPU: AdamW, linear warmup, EMA 0.9999
+as a shadow module, grad-clip 1.0, microbatching, resumable checkpoints (model + EMA + opt
+in one file), and a held-out ε-loss monitor. MPI, `dist_util`, and the hand-rolled fp16
+master-parameter copy are gone; `--precision bf16` uses `torch.autocast`. It **does not
+sample** — it saves EMA checkpoints and stops.
+
+The val monitor re-seeds its own generator every evaluation, so the same (t, ε) are drawn
+each time and consecutive points differ because the weights moved. Absolute value stays
+uninformative for the reason below; only train-vs-val divergence means anything.
 
 ---
 
@@ -20,7 +66,8 @@ Nothing trains yet. First code task is the dataloader.
 
 One noise-level-conditioned network. Four swappable things around it:
 
-- **corruption** — VP (DDPM) / VE (SMLD)
+- **corruption** — VP (DDPM) here; VE (SMLD) is the same axis realized in
+  `score-matching-crackdown/`, which is why the axis is named rather than assumed away
 - **sampler** — ancestral / DDIM / annealed Langevin
 - **space** — pixel / latent
 - **conditioning** — none / class / text
@@ -36,8 +83,9 @@ learned_range), `LossType` (mse / rescaled_mse / kl). Config, not class hierarch
 `respace.py` gives DDIM and arbitrary timestep subsequences over unchanged weights.
 Cosine schedule, learned Σ, hybrid loss, EMA, warmup, grad-clip, fp16 all present.
 
-What it does **not** have is VE / annealed Langevin. That gap is deliberate — SMLD is the
-part he writes himself, against a working VP baseline.
+What it does **not** have is VE / annealed Langevin — and that is fine, because VE is not
+this folder's job. It belongs to `score-matching-crackdown/`, written by hand there against
+a working VP baseline here.
 
 Rejected and why: `lucidrains` (VP-only monolithic `GaussianDiffusion` — keep as a U-Net
 reading reference only); `score_sde_pytorch` (right abstraction, JAX-transliterated
@@ -60,15 +108,17 @@ which is the exact layer being learned).
 EDM is not another model — it's the paper that says which knobs in 1–3 were arbitrary all
 along. Read it **after** those knobs have annoyed him personally.
 
-**Side tracks, one step each, slot in anywhere:**
+**Not here — sibling folders, listed so the plan stays legible:**
 
-- **A. VAE.** ELBO baseline on the same dataset, plus encoder intuition for latent diffusion
-  later. Half-done in theory already — DDPM's bound *is* the VAE ELBO extended to a T-step
-  hierarchy with a fixed encoder.
-- **B. SMLD → Score SDE.** SMLD enters the **core codebase** as a corruption + sampler swap
-  (VE + annealed Langevin), not a second repo. Then Score SDE, where VE/VP drop to config
-  flags. **Do B after DDPM stands** — annealed Langevin is finicky and needs to be debugged
-  against something known to work.
+- **SMLD → Score SDE** → `score-matching-crackdown/`. Still gated on this folder: annealed
+  Langevin is finicky and needs debugging against something known to work, so start it after
+  DDPM stands. Score SDE is where VE and VP become the same object; the comparison is across
+  folders, which is the point of keeping the `lab/` layout identical in both.
+- **VAE** → its own folder. ELBO baseline on the same dataset, plus encoder intuition for
+  latent diffusion later. Half-done in theory already — DDPM's bound *is* the VAE ELBO
+  extended to a T-step hierarchy with a fixed encoder.
+
+Both share the theory track and the dataset. Neither shares this codebase.
 
 **Axes — after the core, one variable at a time:**
 
@@ -88,8 +138,9 @@ along. Read it **after** those knobs have annoyed him personally.
    so by then only the architecture moves. (Note: "EDM via transformers" is not a paper —
    EDM2 is a U-Net training-dynamics paper. DiT is the transformer entry point.)
 
-Scope bar: **stay inside diffusion.** Flow matching / rectified flow is parked — same
-continuous-time family, a later room in the same house. An afternoon whenever he wants it.
+Scope bar: **this folder stays inside denoising diffusion.** Flow matching / rectified flow
+is parked and, when it happens, is its own folder — same continuous-time family, a different
+room in the house, not another wing of this one.
 
 ---
 
